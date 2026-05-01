@@ -129,15 +129,102 @@ services:
       /bin/sh -c "
       sleep 10;
       mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
-      mc mb -p local/$${S3_BUCKET};
-      mc mb -p local/$${S3_BUCKET}/bronze;
-      mc mb -p local/$${S3_BUCKET}/silver;
-      mc mb -p local/$${S3_BUCKET}/gold;
-      mc mb -p local/$${S3_BUCKET}/warehouse;
+      mc mb -p local/$${S3_BUCKET} || true;
       mc ls local;
       exit 0;
       "
 
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: olist_iceberg_rest
+    depends_on:
+      - minio
+    ports:
+      - "8181:8181"
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      CATALOG_WAREHOUSE: s3://lakehouse/warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+    restart: unless-stopped
+
+  trino:
+    image: trinodb/trino:443
+    container_name: olist_trino
+    depends_on:
+      - iceberg-rest
+      - minio
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./trino/etc:/etc/trino
+      - ./trino/catalog:/etc/trino/catalog
+    restart: unless-stopped
+
+  postgres-superset:
+    image: postgres:15
+    container_name: olist_postgres_superset
+    environment:
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+      POSTGRES_DB: superset
+    volumes:
+      - postgres_superset_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset -d superset"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  superset-init:
+    build:
+      context: ./superset
+      dockerfile: Dockerfile
+    image: olist-superset:local
+    container_name: olist_superset_init
+    depends_on:
+      postgres-superset:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-change-me}
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@postgres-superset:5432/superset
+    volumes:
+      - ./superset/superset-init.sh:/app/superset-init.sh
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+    command: ["/bin/bash", "/app/superset-init.sh"]
+
+  superset:
+    build:
+      context: ./superset
+      dockerfile: Dockerfile
+    image: olist-superset:local
+    container_name: olist_superset
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+      postgres-superset:
+        condition: service_healthy
+      trino:
+        condition: service_started
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-change-me}
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@postgres-superset:5432/superset
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+    command: >
+      /bin/bash -c "
+      superset run -h 0.0.0.0 -p 8088
+      "
+    restart: unless-stopped
+
 volumes:
   postgres_airflow_data:
+  postgres_superset_data:
   minio_data:
