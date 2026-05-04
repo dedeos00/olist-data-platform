@@ -11,9 +11,19 @@ data/raw/*
 data/sample/*
 !data/sample/.gitkeep
 
+data/bronze/*
+!data/bronze/.gitkeep
+
+data/silver/*
+!data/silver/.gitkeep
+
+data/gold/*
+!data/gold/.gitkeep
+
 logs/
 airflow/logs/
 airflow/*.db
+
 
 notebooks/.ipynb_checkpoints/
 
