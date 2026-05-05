@@ -94,3 +94,49 @@ def validate_iceberg_bronze_counts() -> None:
             raise ValueError(f"Tabela Iceberg bronze vazia: iceberg.bronze.{table_name}")
 
         print(f"Validação OK: iceberg.bronze.{table_name} possui {count} registros.")
+        
+def register_external_parquet_as_iceberg_table(
+    table_name: str,
+    parquet_path: str,
+    namespace: str = "bronze",
+) -> None:
+    from pathlib import Path
+    import pyarrow.parquet as pq
+    from pyiceberg.exceptions import NoSuchTableError
+    from pyiceberg.io.pyarrow import schema_to_pyarrow
+
+    parquet_file = Path(parquet_path)
+
+    if not parquet_file.exists():
+        raise FileNotFoundError(f"Parquet não encontrado: {parquet_file}")
+
+    arrow_table = pq.read_table(parquet_file)
+
+    if arrow_table.num_rows <= 0:
+        raise ValueError(f"Parquet vazio: {parquet_file}")
+
+    arrow_table = arrow_table.cast(
+        schema_to_pyarrow(_build_iceberg_schema(arrow_table.column_names))
+    )
+
+    catalog = _get_catalog()
+    full_table_name = f"{namespace}.{table_name}"
+
+    catalog.create_namespace_if_not_exists(namespace)
+
+    try:
+        catalog.drop_table(full_table_name)
+    except NoSuchTableError:
+        pass
+
+    iceberg_schema = _build_iceberg_schema(arrow_table.column_names)
+
+    iceberg_table = catalog.create_table(
+        identifier=full_table_name,
+        schema=iceberg_schema,
+    )
+
+    iceberg_table.append(arrow_table)
+
+    print(f"Tabela Iceberg criada: iceberg.{full_table_name}")
+    print(f"Registros inseridos: {arrow_table.num_rows}")
