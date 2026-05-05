@@ -16,4 +16,5 @@ RUN pip install --no-cache-dir \
     pyarrow \
     trino \
     requests \
-    python-dotenv
+    python-dotenv \
+    "pyiceberg[s3fs,pyarrow]"
