@@ -5,7 +5,7 @@ import re
 
 import pandas as pd
 
-from src.utils.trino_client import execute_sql, fetch_one
+from src.utils.trino_client import execute_sql
 
 
 RAW_OLIST_DIR = Path("/opt/airflow/data/raw/olist")
@@ -23,6 +23,34 @@ def _normalize_column_name(name: str) -> str:
     name = re.sub(r"[^a-z0-9_]+", "_", name)
     name = re.sub(r"_+", "_", name)
     return name.strip("_")
+
+
+def _read_csv(filename: str) -> pd.DataFrame:
+    path = RAW_OLIST_DIR / filename
+
+    if not path.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {path}")
+
+    df = pd.read_csv(path, dtype=str)
+    df.columns = [_normalize_column_name(col) for col in df.columns]
+    return df
+
+
+def _write_bronze_parquet(df: pd.DataFrame, table_name: str, source_file: str) -> None:
+    output_dir = BRONZE_OLIST_DIR / table_name
+    output_path = output_dir / "data.parquet"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df = df.copy()
+    df["_ingestion_source_file"] = source_file
+    df["_ingestion_layer"] = "bronze"
+
+    df.to_parquet(output_path, index=False)
+
+    print(f"Arquivo bronze criado: {output_path}")
+    print(f"Tabela: {table_name}")
+    print(f"Registros gravados: {len(df)}")
 
 
 def validate_raw_files_exist() -> None:
@@ -49,51 +77,84 @@ def create_bronze_schema() -> None:
     )
 
 
-def csv_to_local_parquet(
-    table_name: str,
-    filename: str,
-    sample_limit: int | None = 5000,
-) -> None:
-    input_path = RAW_OLIST_DIR / filename
-    output_dir = BRONZE_OLIST_DIR / table_name
-    output_path = output_dir / "data.parquet"
+def load_olist_related_sample_to_parquet(sample_limit: int = 2000) -> None:
+    """
+    Gera uma amostra relacional consistente da Olist.
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    Em vez de pegar head(N) isolado de cada CSV, esta função:
+    1. seleciona N pedidos em orders;
+    2. filtra customers usando os customer_id desses pedidos;
+    3. filtra order_items usando os order_id desses pedidos.
 
-    df = pd.read_csv(input_path, dtype=str)
-    df.columns = [_normalize_column_name(col) for col in df.columns]
+    Isso preserva os joins da camada Gold e evita métricas quebradas.
+    """
+    validate_raw_files_exist()
 
-    df["_ingestion_source_file"] = filename
-    df["_ingestion_layer"] = "bronze"
+    orders = _read_csv(TABLES["olist_orders"])
+    customers = _read_csv(TABLES["olist_customers"])
+    order_items = _read_csv(TABLES["olist_order_items"])
 
-    if sample_limit is not None:
-        df = df.head(sample_limit)
+    sampled_orders = orders.head(sample_limit).copy()
 
-    df.to_parquet(output_path, index=False)
+    sampled_order_ids = set(sampled_orders["order_id"].dropna().unique())
+    sampled_customer_ids = set(sampled_orders["customer_id"].dropna().unique())
 
-    print(f"Arquivo bronze criado: {output_path}")
-    print(f"Registros gravados: {len(df)}")
+    sampled_customers = customers[
+        customers["customer_id"].isin(sampled_customer_ids)
+    ].copy()
+
+    sampled_order_items = order_items[
+        order_items["order_id"].isin(sampled_order_ids)
+    ].copy()
+
+    if sampled_orders.empty:
+        raise ValueError("Amostra de orders ficou vazia.")
+
+    if sampled_customers.empty:
+        raise ValueError("Amostra de customers ficou vazia.")
+
+    if sampled_order_items.empty:
+        raise ValueError("Amostra de order_items ficou vazia.")
+
+    _write_bronze_parquet(
+        df=sampled_orders,
+        table_name="olist_orders",
+        source_file=TABLES["olist_orders"],
+    )
+
+    _write_bronze_parquet(
+        df=sampled_customers,
+        table_name="olist_customers",
+        source_file=TABLES["olist_customers"],
+    )
+
+    _write_bronze_parquet(
+        df=sampled_order_items,
+        table_name="olist_order_items",
+        source_file=TABLES["olist_order_items"],
+    )
 
 
 def load_csv_to_iceberg(
     table_name: str,
     filename: str,
-    sample_limit: int | None = 5000,
+    sample_limit: int | None = 2000,
 ) -> None:
     """
-    Primeira versão estável da bronze:
-    - lê CSV bruto
-    - normaliza nomes de colunas
-    - adiciona metadados de ingestão
-    - grava Parquet local em data/bronze/olist/<table>/data.parquet
+    Mantido por compatibilidade com versões antigas da DAG.
 
-    A materialização Iceberg definitiva será feita na próxima etapa,
-    usando estes Parquets como base.
+    Para garantir amostra relacional, prefira usar
+    load_olist_related_sample_to_parquet().
     """
-    csv_to_local_parquet(
+    df = _read_csv(filename)
+
+    if sample_limit is not None:
+        df = df.head(sample_limit)
+
+    _write_bronze_parquet(
+        df=df,
         table_name=table_name,
-        filename=filename,
-        sample_limit=sample_limit,
+        source_file=filename,
     )
 
 

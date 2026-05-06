@@ -7,7 +7,7 @@ from airflow.decorators import dag, task
 
 from src.bronze.load_olist_bronze import (
     create_bronze_schema,
-    load_csv_to_iceberg,
+    load_olist_related_sample_to_parquet,
     validate_bronze_counts,
     validate_raw_files_exist,
 )
@@ -58,28 +58,8 @@ def olist_bronze_pipeline():
         )
 
     @task
-    def load_orders():
-        load_csv_to_iceberg(
-            table_name="olist_orders",
-            filename="olist_orders_dataset.csv",
-            sample_limit=500,
-        )
-
-    @task
-    def load_customers():
-        load_csv_to_iceberg(
-            table_name="olist_customers",
-            filename="olist_customers_dataset.csv",
-            sample_limit=500,
-        )
-
-    @task
-    def load_order_items():
-        load_csv_to_iceberg(
-            table_name="olist_order_items",
-            filename="olist_order_items_dataset.csv",
-            sample_limit=500,
-        )
+    def load_related_sample():
+        load_olist_related_sample_to_parquet(sample_limit=2000)
 
     @task
     def validate_local_parquet_counts():
@@ -105,10 +85,7 @@ def olist_bronze_pipeline():
     schema = create_schema()
     trino_ready = wait_for_trino()
 
-    orders = load_orders()
-    customers = load_customers()
-    order_items = load_order_items()
-
+    related_sample = load_related_sample()
     local_validation = validate_local_parquet_counts()
 
     register_orders = register_orders_iceberg()
@@ -117,7 +94,7 @@ def olist_bronze_pipeline():
 
     iceberg_validation = validate_iceberg_counts()
 
-    check >> schema >> trino_ready >> [orders, customers, order_items] >> local_validation
+    check >> schema >> trino_ready >> related_sample >> local_validation
     local_validation >> register_orders >> register_customers >> register_order_items >> iceberg_validation
 
 
